@@ -19,9 +19,19 @@ import com.google.ai.edge.litertlm.EngineConfig
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
 import kotlin.concurrent.thread
 
-class Agent(var id: String, var name: String, var rules: String, var knowledge: String)
+class Agent(
+    var id: String,
+    var name: String,
+    var rules: String,
+    var knowledge: String,
+    var web: Boolean = true,
+    var saved: String = ""
+)
 
 class MainActivity : Activity() {
     private val C_TOP = 0xFF1A1033.toInt()
@@ -61,7 +71,12 @@ class MainActivity : Activity() {
             val arr = JSONArray(s)
             for (i in 0 until arr.length()) {
                 val o = arr.getJSONObject(i)
-                agents.add(Agent(o.getString("id"), o.getString("name"), o.getString("rules"), o.getString("knowledge")))
+                agents.add(
+                    Agent(
+                        o.getString("id"), o.getString("name"), o.getString("rules"), o.getString("knowledge"),
+                        o.optBoolean("web", true), o.optString("saved", "")
+                    )
+                )
             }
         }
         if (agents.isEmpty()) agents.add(Agent("a1", "Mein erster Assistent", "Antworte freundlich, kurz und auf Deutsch.", ""))
@@ -69,7 +84,12 @@ class MainActivity : Activity() {
 
     private fun save() {
         val arr = JSONArray()
-        agents.forEach { arr.put(JSONObject().put("id", it.id).put("name", it.name).put("rules", it.rules).put("knowledge", it.knowledge)) }
+        agents.forEach {
+            arr.put(
+                JSONObject().put("id", it.id).put("name", it.name).put("rules", it.rules)
+                    .put("knowledge", it.knowledge).put("web", it.web).put("saved", it.saved)
+            )
+        }
         prefs.edit().putString("agents", arr.toString()).apply()
     }
 
@@ -162,7 +182,7 @@ class MainActivity : Activity() {
         onBack = { finish() }
         val col = column()
         col.put(tv("🤖 KI-Baukasten", 30f, true), 0, anim = 0)
-        col.put(tv("Deine eigenen KIs. Alles läuft offline auf deinem Handy.", 14f, false, C_SUB), 4, anim = 1)
+        col.put(tv("Deine eigenen KIs. Antworten laufen offline auf deinem Handy.", 14f, false, C_SUB), 4, anim = 1)
         val ok = modelFile.exists()
         col.put(chip(if (ok) "● " + modelInfo() else "○ Modell fehlt noch", if (ok) 0xFF7CFFB2.toInt() else 0xFFFFC857.toInt()), 14, w = WRAP, anim = 2)
         col.put(btn("Modell-Datei auswählen (.litertlm)", false) { pickModel() }, 12, anim = 3)
@@ -218,7 +238,14 @@ class MainActivity : Activity() {
         val name = edit("Name", a.name, 1)
         val rules = edit("z. B. Antworte immer kurz und höflich.", a.rules, 4)
         val know = edit("Hier deine Daten einfügen ...", a.knowledge, 10)
-        val store = { a.name = name.text.toString(); a.rules = rules.text.toString(); a.knowledge = know.text.toString(); save() }
+        val sw = Switch(this).apply {
+            text = "🌐 Online suchen und Treffer speichern"
+            isChecked = a.web; setTextColor(C_TXT); textSize = 15f
+        }
+        val store = {
+            a.name = name.text.toString(); a.rules = rules.text.toString()
+            a.knowledge = know.text.toString(); a.web = sw.isChecked; save()
+        }
         onBack = { store(); showList() }
         val col = column()
         col.put(tv("Einstellungen", 28f, true), 0, anim = 0)
@@ -230,8 +257,15 @@ class MainActivity : Activity() {
         col.put(tv("3. Wissen und Daten", 16f, true), 18, anim = 3)
         col.put(tv("Alles, was die KI kennen soll. Einfach einfügen.", 13f, false, C_SUB), 2, anim = 3)
         col.put(know, 6, anim = 3)
-        col.put(btn("Speichern und zurück") { store(); showList() }, 22, anim = 4)
-        col.put(btn("Diese KI löschen", false) { agents.remove(a); chats.remove(id); save(); showList() }, 8, anim = 5)
+        col.put(tv("4. Internet", 16f, true), 18, anim = 4)
+        col.put(tv("Mit Internet sucht die App bei jeder Frage auf Wikipedia und speichert die Treffer. Offline nutzt die KI diese gespeicherten Infos.", 13f, false, C_SUB), 2, anim = 4)
+        col.put(sw, 8, anim = 4)
+        col.put(tv("Gespeichert aus dem Web: " + (a.saved.length / 1000) + " KB", 13f, false, C_SUB), 6, anim = 4)
+        col.put(btn("Gespeicherte Web-Infos löschen", false) {
+            a.saved = ""; store(); showEdit(id)
+        }, 8, anim = 4)
+        col.put(btn("Speichern und zurück") { store(); showList() }, 22, anim = 5)
+        col.put(btn("Diese KI löschen", false) { agents.remove(a); chats.remove(id); save(); showList() }, 8, anim = 6)
         setContentView(ScrollView(this).apply { addView(col); gradient(this) })
     }
 
@@ -271,7 +305,7 @@ class MainActivity : Activity() {
                 val m = "Bitte zuerst auf der Startseite die Modell-Datei auswählen."
                 hist.add(false to m); bubble(false, m); return@setOnClickListener
             }
-            val wait = bubble(false, "Denke nach ...")
+            val wait = bubble(false, if (a.web) "Suche und denke nach ..." else "Denke nach ...")
             busy = true
             val pulse = ObjectAnimator.ofFloat(wait, "alpha", 1f, 0.3f).apply {
                 duration = 700; repeatCount = ValueAnimator.INFINITE; repeatMode = ValueAnimator.REVERSE
@@ -301,6 +335,49 @@ class MainActivity : Activity() {
         setContentView(root)
     }
 
+    // ---------- Web-Suche (Wikipedia) ----------
+    private fun webSearch(q: String): List<Pair<String, String>> {
+        val query = q.replace(Regex("[^\\p{L}\\p{N} ]"), " ").trim()
+        if (query.isEmpty()) return emptyList()
+        for (lang in listOf("de", "en")) {
+            val url = "https://$lang.wikipedia.org/w/api.php?action=query&format=json&prop=extracts" +
+                "&exintro=1&explaintext=1&exchars=1500&exlimit=3&generator=search&gsrlimit=3&gsrsearch=" +
+                URLEncoder.encode(query, "UTF-8")
+            val c = URL(url).openConnection() as HttpURLConnection
+            c.connectTimeout = 4000
+            c.readTimeout = 6000
+            c.setRequestProperty("User-Agent", "KI-Baukasten/1.0 (Android)")
+            val txt = c.inputStream.bufferedReader().use { it.readText() }
+            val pages = JSONObject(txt).optJSONObject("query")?.optJSONObject("pages") ?: continue
+            val out = mutableListOf<Pair<String, String>>()
+            val keys = pages.keys()
+            while (keys.hasNext()) {
+                val p = pages.getJSONObject(keys.next())
+                val ex = p.optString("extract").trim()
+                if (ex.isNotEmpty()) out.add(p.getString("title") to ex)
+            }
+            if (out.isNotEmpty()) return out
+        }
+        return emptyList()
+    }
+
+    // null bedeutet: offline oder Fehler
+    private fun webSearchSafe(q: String): List<Pair<String, String>>? =
+        try { webSearch(q) } catch (e: Throwable) { null }
+
+    private fun saveWeb(a: Agent, items: List<Pair<String, String>>): List<String> {
+        val added = mutableListOf<String>()
+        items.forEach { (t, x) ->
+            if (!a.saved.contains("## $t\n")) {
+                a.saved += "## $t\n$x\n\n"
+                added.add(t)
+            }
+        }
+        if (a.saved.length > 200000) a.saved = a.saved.takeLast(200000)
+        if (added.isNotEmpty()) save()
+        return added
+    }
+
     // ---------- KI (lokal) ----------
     private fun ensureEngine(): Engine {
         engine?.let { return it }
@@ -318,10 +395,21 @@ class MainActivity : Activity() {
     }
 
     private fun ask(a: Agent, q: String): String {
-        val info = if (a.knowledge.isBlank()) "(keine Infos hinterlegt)" else relevant(a.knowledge, q)
+        var note = ""
+        if (a.web) {
+            val r = webSearchSafe(q)
+            note = if (r == null) {
+                "📴 Offline: ich nutze die gespeicherten Infos.\n\n"
+            } else {
+                val n = saveWeb(a, r)
+                if (n.isEmpty()) "" else "🌐 Gespeichert: " + n.joinToString(", ") + "\n\n"
+            }
+        }
+        val all = a.knowledge + "\n\n" + a.saved
+        val info = if (all.isBlank()) "(keine Infos hinterlegt)" else relevant(all, q)
         val prompt = "Du bist die KI \"${a.name}\".\nRICHTLINIEN:\n${a.rules.ifBlank { "keine" }}\n\n" +
             "INFOS (antworte nur anhand dieser Infos; steht die Antwort nicht darin, sage das ehrlich):\n$info\n\nFRAGE: $q\n\nANTWORT:"
         val e = ensureEngine()
-        e.createConversation().use { c -> return c.sendMessage(prompt).toString() }
+        e.createConversation().use { c -> return note + c.sendMessage(prompt).toString() }
     }
 }
