@@ -39,8 +39,9 @@ class MainActivity : Activity() {
     private var engine: Engine? = null
     private var busy = false
     private var onBack: () -> Unit = {}
-    private val modelFile get() = File(filesDir, "model.litertlm")
     private val prefs get() = getSharedPreferences("ki", Context.MODE_PRIVATE)
+    private val modelFile get() = File(filesDir, prefs.getString("model", "model.litertlm") ?: "model.litertlm")
+    private val cacheLm get() = File(cacheDir, "lm")
 
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
@@ -70,6 +71,28 @@ class MainActivity : Activity() {
         val arr = JSONArray()
         agents.forEach { arr.put(JSONObject().put("id", it.id).put("name", it.name).put("rules", it.rules).put("knowledge", it.knowledge)) }
         prefs.edit().putString("agents", arr.toString()).apply()
+    }
+
+    // ---------- Modell-Verwaltung ----------
+    private fun modelInfo(): String {
+        val f = modelFile
+        if (!f.exists()) return "Modell fehlt noch"
+        val head = try {
+            f.inputStream().use { s ->
+                val b = ByteArray(8)
+                val n = s.read(b)
+                String(b, 0, maxOf(n, 0), Charsets.ISO_8859_1).filter { it.code in 32..126 }
+            }
+        } catch (e: Throwable) { "?" }
+        return "Modell: " + (f.length() / 1048576) + " MB, Kopf: " + head
+    }
+
+    private fun deleteModel() {
+        try { engine?.close() } catch (e: Throwable) { }
+        engine = null
+        filesDir.listFiles()?.filter { it.name.startsWith("model") }?.forEach { it.delete() }
+        cacheLm.deleteRecursively()
+        prefs.edit().remove("model").apply()
     }
 
     // ---------- Design-Helfer ----------
@@ -141,8 +164,9 @@ class MainActivity : Activity() {
         col.put(tv("🤖 KI-Baukasten", 30f, true), 0, anim = 0)
         col.put(tv("Deine eigenen KIs. Alles läuft offline auf deinem Handy.", 14f, false, C_SUB), 4, anim = 1)
         val ok = modelFile.exists()
-        col.put(chip(if (ok) "● Modell bereit" else "○ Modell fehlt noch", if (ok) 0xFF7CFFB2.toInt() else 0xFFFFC857.toInt()), 14, w = WRAP, anim = 2)
+        col.put(chip(if (ok) "● " + modelInfo() else "○ Modell fehlt noch", if (ok) 0xFF7CFFB2.toInt() else 0xFFFFC857.toInt()), 14, w = WRAP, anim = 2)
         col.put(btn("Modell-Datei auswählen (.litertlm)", false) { pickModel() }, 12, anim = 3)
+        if (ok) col.put(btn("Modell löschen", false) { deleteModel(); showList() }, 8, anim = 3)
         var i = 4
         agents.forEach { a ->
             val row = LinearLayout(this).apply {
@@ -175,11 +199,13 @@ class MainActivity : Activity() {
         Toast.makeText(this, "Modell wird kopiert, das kann einige Minuten dauern ...", Toast.LENGTH_LONG).show()
         thread {
             try {
-                val tmp = File(filesDir, "model.tmp")
+                val tmp = File(filesDir, "copy.tmp")
                 contentResolver.openInputStream(uri)!!.use { i -> tmp.outputStream().use { o -> i.copyTo(o) } }
-                engine?.close(); engine = null
-                modelFile.delete(); tmp.renameTo(modelFile)
-                runOnUiThread { Toast.makeText(this, "Modell bereit", Toast.LENGTH_SHORT).show(); showList() }
+                deleteModel()
+                val name = "model_" + System.currentTimeMillis() + ".litertlm"
+                if (!tmp.renameTo(File(filesDir, name))) throw Exception("Umbenennen fehlgeschlagen")
+                prefs.edit().putString("model", name).apply()
+                runOnUiThread { Toast.makeText(this, "Modell kopiert", Toast.LENGTH_SHORT).show(); showList() }
             } catch (t: Throwable) {
                 runOnUiThread { Toast.makeText(this, "Fehler: " + t.message, Toast.LENGTH_LONG).show() }
             }
@@ -225,76 +251,3 @@ class MainActivity : Activity() {
             }
             val lp = LinearLayout.LayoutParams(WRAP, WRAP).apply {
                 gravity = if (mine) Gravity.END else Gravity.START
-                topMargin = dp(10)
-                if (mine) leftMargin = dp(48) else rightMargin = dp(48)
-            }
-            chat.addView(v, lp)
-            appear(v, 0)
-            scroll.post { scroll.fullScroll(ScrollView.FOCUS_DOWN) }
-            return v
-        }
-        hist.forEach { bubble(it.first, it.second) }
-
-        val input = edit("Nachricht ...", "", 1)
-        val send = btn("➤") {}
-        send.setOnClickListener {
-            val q = input.text.toString().trim()
-            if (q.isEmpty() || busy) return@setOnClickListener
-            input.setText(""); hist.add(true to q); bubble(true, q)
-            if (!modelFile.exists()) {
-                val m = "Bitte zuerst auf der Startseite die Modell-Datei auswählen."
-                hist.add(false to m); bubble(false, m); return@setOnClickListener
-            }
-            val wait = bubble(false, "Denke nach ...")
-            busy = true
-            val pulse = ObjectAnimator.ofFloat(wait, "alpha", 1f, 0.3f).apply {
-                duration = 700; repeatCount = ValueAnimator.INFINITE; repeatMode = ValueAnimator.REVERSE
-            }
-            wait.postDelayed({ if (busy) pulse.start() }, 450)
-            thread {
-                val ans = try { ask(a, q) } catch (t: Throwable) { "Fehler: " + t.message }
-                runOnUiThread {
-                    pulse.cancel(); wait.alpha = 1f
-                    wait.text = ans; hist.add(false to ans); busy = false
-                    scroll.post { scroll.fullScroll(ScrollView.FOCUS_DOWN) }
-                }
-            }
-        }
-
-        val top = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(12), dp(44), dp(12), dp(4)) }
-        top.put(btn("←", false) { showList() }, 0, w = WRAP)
-        top.put(tv("🤖 " + a.name, 20f, true), 0, w = WRAP, left = 12)
-        val bar = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(12), dp(6), dp(12), dp(12)) }
-        bar.put(input, 0, w = 0, weight = 1f)
-        bar.put(send, 0, w = WRAP, left = 8)
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        root.addView(top)
-        root.addView(scroll, LinearLayout.LayoutParams(MATCH, 0, 1f))
-        root.addView(bar)
-        gradient(root)
-        setContentView(root)
-    }
-
-    // ---------- KI (lokal) ----------
-    private fun ensureEngine(): Engine {
-        engine?.let { return it }
-        val cfg = EngineConfig(modelPath = modelFile.absolutePath, backend = Backend.CPU(), cacheDir = cacheDir.path)
-        val e = Engine(cfg); e.initialize(); engine = e
-        return e
-    }
-
-    // Wählt aus deinen Daten nur die Abschnitte, die zur Frage passen
-    private fun relevant(k: String, q: String): String {
-        val chunks = k.split(Regex("\n\\s*\n")).flatMap { it.chunked(600) }.filter { it.isNotBlank() }
-        val words = q.lowercase().split(Regex("[^\\p{L}\\p{N}]+")).filter { it.length > 2 }.toSet()
-        return chunks.sortedByDescending { c -> val l = c.lowercase(); words.count { l.contains(it) } }.take(5).joinToString("\n---\n")
-    }
-
-    private fun ask(a: Agent, q: String): String {
-        val info = if (a.knowledge.isBlank()) "(keine Infos hinterlegt)" else relevant(a.knowledge, q)
-        val prompt = "Du bist die KI \"${a.name}\".\nRICHTLINIEN:\n${a.rules.ifBlank { "keine" }}\n\n" +
-            "INFOS (antworte nur anhand dieser Infos; steht die Antwort nicht darin, sage das ehrlich):\n$info\n\nFRAGE: $q\n\nANTWORT:"
-        val e = ensureEngine()
-        e.createConversation().use { c -> return c.sendMessage(prompt).toString() }
-    }
-}
