@@ -251,3 +251,77 @@ class MainActivity : Activity() {
             }
             val lp = LinearLayout.LayoutParams(WRAP, WRAP).apply {
                 gravity = if (mine) Gravity.END else Gravity.START
+                topMargin = dp(10)
+                if (mine) leftMargin = dp(48) else rightMargin = dp(48)
+            }
+            chat.addView(v, lp)
+            appear(v, 0)
+            scroll.post { scroll.fullScroll(ScrollView.FOCUS_DOWN) }
+            return v
+        }
+        hist.forEach { bubble(it.first, it.second) }
+
+        val input = edit("Nachricht ...", "", 1)
+        val send = btn("➤") {}
+        send.setOnClickListener {
+            val q = input.text.toString().trim()
+            if (q.isEmpty() || busy) return@setOnClickListener
+            input.setText(""); hist.add(true to q); bubble(true, q)
+            if (!modelFile.exists()) {
+                val m = "Bitte zuerst auf der Startseite die Modell-Datei auswählen."
+                hist.add(false to m); bubble(false, m); return@setOnClickListener
+            }
+            val wait = bubble(false, "Denke nach ...")
+            busy = true
+            val pulse = ObjectAnimator.ofFloat(wait, "alpha", 1f, 0.3f).apply {
+                duration = 700; repeatCount = ValueAnimator.INFINITE; repeatMode = ValueAnimator.REVERSE
+            }
+            wait.postDelayed({ if (busy) pulse.start() }, 450)
+            thread {
+                val ans = try { ask(a, q) } catch (t: Throwable) { "Fehler: " + t.message + "\n(" + modelInfo() + ")" }
+                runOnUiThread {
+                    pulse.cancel(); wait.alpha = 1f
+                    wait.text = ans; hist.add(false to ans); busy = false
+                    scroll.post { scroll.fullScroll(ScrollView.FOCUS_DOWN) }
+                }
+            }
+        }
+
+        val top = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(12), dp(44), dp(12), dp(4)) }
+        top.put(btn("←", false) { showList() }, 0, w = WRAP)
+        top.put(tv("🤖 " + a.name, 20f, true), 0, w = WRAP, left = 12)
+        val bar = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL; setPadding(dp(12), dp(6), dp(12), dp(12)) }
+        bar.put(input, 0, w = 0, weight = 1f)
+        bar.put(send, 0, w = WRAP, left = 8)
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root.addView(top)
+        root.addView(scroll, LinearLayout.LayoutParams(MATCH, 0, 1f))
+        root.addView(bar)
+        gradient(root)
+        setContentView(root)
+    }
+
+    // ---------- KI (lokal) ----------
+    private fun ensureEngine(): Engine {
+        engine?.let { return it }
+        cacheLm.mkdirs()
+        val cfg = EngineConfig(modelPath = modelFile.absolutePath, backend = Backend.CPU(), cacheDir = cacheLm.path)
+        val e = Engine(cfg); e.initialize(); engine = e
+        return e
+    }
+
+    // Wählt aus deinen Daten nur die Abschnitte, die zur Frage passen
+    private fun relevant(k: String, q: String): String {
+        val chunks = k.split(Regex("\n\\s*\n")).flatMap { it.chunked(600) }.filter { it.isNotBlank() }
+        val words = q.lowercase().split(Regex("[^\\p{L}\\p{N}]+")).filter { it.length > 2 }.toSet()
+        return chunks.sortedByDescending { c -> val l = c.lowercase(); words.count { l.contains(it) } }.take(5).joinToString("\n---\n")
+    }
+
+    private fun ask(a: Agent, q: String): String {
+        val info = if (a.knowledge.isBlank()) "(keine Infos hinterlegt)" else relevant(a.knowledge, q)
+        val prompt = "Du bist die KI \"${a.name}\".\nRICHTLINIEN:\n${a.rules.ifBlank { "keine" }}\n\n" +
+            "INFOS (antworte nur anhand dieser Infos; steht die Antwort nicht darin, sage das ehrlich):\n$info\n\nFRAGE: $q\n\nANTWORT:"
+        val e = ensureEngine()
+        e.createConversation().use { c -> return c.sendMessage(prompt).toString() }
+    }
+}
